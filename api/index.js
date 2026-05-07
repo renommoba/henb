@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
     // ==========================================
     // BULLET PH - API CAPTCHA SOLVER (CAPMONSTER)
-    // AUTO DETECT TUNGGAL / MASSAL
+    // AUTO-DETECT SINGLE & MASSAL (MAX TIMEOUT)
     // ==========================================
     const API_KEY = "50631b384d9931bb2b33f51a38af66ef";
     const WEB_KEY = "fef5c67c39074e9d845f4bf579cc07af";
@@ -9,7 +9,7 @@ export default async function handler(req, res) {
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-    const solveCaptcha = async () => {
+    const solveSingleCaptcha = async () => {
         try {
             // 1. Create Task
             const createReq = await fetch("https://api.capmonster.cloud/createTask", {
@@ -27,15 +27,17 @@ export default async function handler(req, res) {
             const create = await createReq.json();
 
             if (!create.taskId) {
-                return { status: "error", message: "Gagal membuat tugas di CapMonster", code: create.errorCode || "UNKNOWN" };
+                return { status: "error", message: "Gagal membuat tugas", code: create.errorCode || "UNKNOWN" };
             }
 
             const taskId = create.taskId;
             let token = "";
 
             // 2. Polling (Menunggu Jawaban AI)
-            for (let i = 0; i < 15; i++) {
-                await sleep(3000); // Delay 3 detik
+            // Loop dinaikkan jadi 19 kali (19 x 3 detik = 57 detik)
+            // Disisakan 3 detik agar tidak di-kill otomatis oleh Vercel
+            for (let i = 0; i < 19; i++) {
+                await sleep(3000);
                 const resultReq = await fetch("https://api.capmonster.cloud/getTaskResult", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -47,9 +49,8 @@ export default async function handler(req, res) {
                     token = result.solution?.token || "";
                     break;
                 }
-                
                 if (result.errorId !== 0) {
-                    return { status: "error", message: "AI CapMonster mengalami gangguan", code: result.errorCode };
+                    return { status: "error", message: "AI CapMonster error", code: result.errorCode };
                 }
             }
 
@@ -57,30 +58,54 @@ export default async function handler(req, res) {
             if (token) {
                 return { status: "success", cn31: token, taskId: taskId };
             } else {
-                return { status: "error", message: "Waktu habis (AI Timeout)" };
+                return { status: "error", message: "Waktu habis (AI Timeout > 57 detik)" };
             }
         } catch (error) {
-            return { status: "error", message: "Terjadi kesalahan server", detail: error.message };
+            return { status: "error", message: "Error server", detail: error.message };
         }
     };
 
-    // --- DETEKSI OTOMATIS ---
+    // --- LOGIC AUTO-DETECT SINGLE / MASSAL ---
     
-    // Jika request method POST dan body berbentuk Array (contoh payload: [{}, {}, {}]) -> PROSES MASSAL
-    if (req.method === 'POST' && Array.isArray(req.body) && req.body.length > 0) {
-        // Batasi maksimal misal 20 agar tidak timeout di Vercel
-        const limit = Math.min(req.body.length, 20); 
-        const tasks = [];
-        
-        for (let i = 0; i < limit; i++) {
-            tasks.push(solveCaptcha());
+    let count = 1;
+    let isMassal = false;
+
+    // Cek JSON Body
+    if (req.method === 'POST' && req.body) {
+        if (Array.isArray(req.body)) {
+            count = req.body.length;
+            isMassal = true;
+        } else if (req.body.count) {
+            count = parseInt(req.body.count, 10);
+            isMassal = true;
         }
-        
-        const results = await Promise.all(tasks);
-        return res.status(200).json(results);
     }
     
-    // Jika request biasa (GET/POST tanpa Array) -> PROSES 1 SAJA
-    const singleResult = await solveCaptcha();
-    return res.status(200).json(singleResult);
+    // Cek Query URL
+    if (req.query && req.query.count) {
+        count = parseInt(req.query.count, 10);
+        isMassal = true;
+    }
+
+    if (count <= 1 || isNaN(count)) {
+        count = 1;
+        isMassal = false;
+    }
+
+    // Limit proses untuk mengamankan server
+    if (count > 20) count = 20;
+
+    // --- EKSEKUSI OTOMATIS ---
+
+    if (isMassal) {
+        const tasks = [];
+        for (let i = 0; i < count; i++) {
+            tasks.push(solveSingleCaptcha());
+        }
+        const results = await Promise.all(tasks);
+        return res.status(200).json(results); 
+    } else {
+        const result = await solveSingleCaptcha();
+        return res.status(200).json(result);
+    }
 }
